@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from time import struct_time
 
@@ -21,6 +22,8 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_DEFAULT_MAX_WORKERS: int = 8
+
 
 class RSSDownloadError(Exception):
     """Raised when an RSS feed cannot be downloaded or parsed."""
@@ -33,11 +36,15 @@ class RSSDownloadError(Exception):
     retry=retry_if_exception_type((httpx.HTTPError, RSSDownloadError)),
 )
 def _fetch_feed_content(url: str, timeout_seconds: int) -> str:
-    """Fetch raw RSS feed content from a URL with retries."""
+    """Fetch raw RSS feed content from a URL with retries and timeout handling."""
     headers = {"User-Agent": DEFAULT_RSS_USER_AGENT}
     try:
-        response = httpx.get(url, headers=headers, timeout=timeout_seconds)
-        response.raise_for_status()
+        with httpx.Client(timeout=httpx.Timeout(timeout_seconds)) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        logger.warning("Timeout while fetching feed {}: {}", url, exc)
+        raise RSSDownloadError(f"Timeout while fetching feed: {url}") from exc
     except httpx.HTTPError as exc:
         logger.warning("HTTP error while fetching feed {}: {}", url, exc)
         raise
@@ -54,6 +61,20 @@ def _parse_published_date(entry: feedparser.FeedParserDict) -> datetime:
     return datetime(*parsed_time[:6], tzinfo=timezone.utc)
 
 
+def _extract_image_url(entry: feedparser.FeedParserDict) -> str | None:
+    """Extract a representative image URL from a feed entry, if present."""
+    media_content = entry.get("media_content")
+    if media_content:
+        url = media_content[0].get("url")
+        if url:
+            return str(url)
+    links = entry.get("links", [])
+    for link in links:
+        if str(link.get("type", "")).startswith("image/"):
+            return str(link.get("href"))
+    return None
+
+
 def _entry_to_article(entry: feedparser.FeedParserDict, source: str) -> RSSArticle:
     """Convert a single feed entry into an RSSArticle instance."""
     return RSSArticle(
@@ -68,20 +89,6 @@ def _entry_to_article(entry: feedparser.FeedParserDict, source: str) -> RSSArtic
         image_url=_extract_image_url(entry),
         guid=entry.get("id") or entry.get("guid"),
     )
-
-
-def _extract_image_url(entry: feedparser.FeedParserDict) -> str | None:
-    """Extract a representative image URL from a feed entry, if present."""
-    media_content = entry.get("media_content")
-    if media_content:
-        url = media_content[0].get("url")
-        if url:
-            return str(url)
-    links = entry.get("links", [])
-    for link in links:
-        if str(link.get("type", "")).startswith("image/"):
-            return str(link.get("href"))
-    return None
 
 
 def download_feed(url: str, max_articles: int | None = None) -> list[RSSArticle]:
@@ -112,16 +119,33 @@ def download_feed(url: str, max_articles: int | None = None) -> list[RSSArticle]
     return articles
 
 
-def download_feeds(urls: list[str], max_articles: int | None = None) -> list[RSSArticle]:
-    """Download and parse multiple RSS feed URLs, aggregating all articles."""
+def download_feeds(
+    urls: list[str],
+    max_articles: int | None = None,
+    max_workers: int = _DEFAULT_MAX_WORKERS,
+) -> list[RSSArticle]:
+    """Download and parse multiple RSS feed URLs in parallel, aggregating articles."""
     all_articles: list[RSSArticle] = []
-    for url in urls:
-        try:
-            articles = download_feed(url, max_articles=max_articles)
-            all_articles.extend(articles)
-        except Exception as exc:
-            logger.exception("Unexpected error processing feed {}: {}", url, exc)
-            continue
+
+    if not urls:
+        return all_articles
+
+    worker_count = min(max_workers, len(urls))
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_url: dict[Future[list[RSSArticle]], str] = {
+            executor.submit(download_feed, url, max_articles): url for url in urls
+        }
+
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                articles = future.result()
+                all_articles.extend(articles)
+            except Exception as exc:
+                logger.exception("Unexpected error processing feed {}: {}", url, exc)
+                continue
+
     logger.info(
         "Downloaded a total of {} articles from {} feeds", len(all_articles), len(urls)
     )

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 
-import pytest
+from datetime import datetime, timezone
 
 from src.models.rss_article import RSSArticle
 from src.services.topic_classifier import (
@@ -80,11 +79,55 @@ def _make_article(title: str, summary: str = "", content: str = "") -> RSSArticl
         ),
     ],
 )
-def test_classify_text_returns_expected_label(
-    text: str, expected_label: TopicLabel
-) -> None:
+def test_classify_text_returns_expected_label() -> None:
     """Each category's representative text should classify to its expected label."""
-    assert classify_text(text) == expected_label
+    cases = [
+        (
+            "India and the United States sign a new bilateral trade agreement",
+            TopicLabel.IR,
+        ),
+        (
+            "Lok Sabha passes the constitutional amendment bill",
+            TopicLabel.POLITY,
+        ),
+        ("RBI announces new monetary policy amid rising inflation", TopicLabel.ECONOMY),
+        (
+            "ISRO successfully launches new satellite using quantum technology",
+            TopicLabel.SCIENCE,
+        ),
+        (
+            "Climate change and global warming threaten biodiversity in wetlands",
+            TopicLabel.ENVIRONMENT,
+        ),
+        (
+            "Archaeological findings reveal new insights into ancient india heritage site",
+            TopicLabel.HISTORY,
+        ),
+        (
+            "Government launches new education policy to reduce poverty and improve literacy",
+            TopicLabel.SOCIETY,
+        ),
+        (
+            "Committee report highlights concerns over corruption and lack of accountability",
+            TopicLabel.ETHICS,
+        ),
+        (
+            "World Bank report ranks countries on the human development index",
+            TopicLabel.REPORTS,
+        ),
+        (
+            "New bridge to connect the coastal area near the river basin valley",
+            TopicLabel.PLACES,
+        ),
+        (
+            "Chief Justice appointed as new head of the judiciary commission",
+            TopicLabel.PERSONS,
+        ),
+        ("Tiger reserve reports rise in endangered species population", TopicLabel.SPECIES),
+    ]
+
+    for text, expected_label in cases:
+        assert classify_text(text) == expected_label
 
 
 def test_classify_text_returns_unclassified_for_unrelated_text() -> None:
